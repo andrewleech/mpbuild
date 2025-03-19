@@ -41,14 +41,21 @@ def build_board(
     mpy_dir, _ = find_mpy_root(mpy_dir)
     db = board_database(mpy_dir)
 
-    if board not in db.boards.keys():
+    if board in db.boards.keys():
+        _board = db.boards[board]
+        target = _board
+        port = _board.port.name
+        _title = f" {port}/{board}"
+    elif board in db.ports.keys():
+        _board = None
+        port = db.ports[board].name
+        target = port
+        _title = f" {port}"
+    else:
         print("Invalid board")
         raise SystemExit()
 
-    _board = db.boards[board]
-    port = _board.port.name
-
-    if variant and variant not in [v.name for v in _board.variants]:
+    if variant and variant not in [v.name for v in target.variants]:
         print("Invalid variant")
         raise SystemExit()
 
@@ -69,6 +76,8 @@ def build_board(
             idf = IDF_DEFAULT
         build_container += f":{idf}"
 
+    print("****", board, port)
+    board_cmd = "" if board == port else "BOARD={board}"
     variant_param = "VARIANT" if board == port else "BOARD_VARIANT"
     variant_cmd = f" {variant_param}={variant}" if variant else ""
 
@@ -76,7 +85,7 @@ def build_board(
 
     make_mpy_cross_cmd = "make -C mpy-cross && "
     update_submodules_cmd = (
-        f"make -C ports/{port} submodules BOARD={board}{variant_cmd} && "
+        f"make -C ports/{port} submodules {board_cmd}{variant_cmd} && "
     )
 
     uid, gid = os.getuid(), os.getgid()
@@ -105,12 +114,12 @@ def build_board(
         f"git config --global --add safe.directory '*' 2> /dev/null;"
         f'{make_mpy_cross_cmd}'
         f'{update_submodules_cmd}'
-        f'make -j {nprocs} -C ports/{port} BOARD={board}{variant_cmd}{args}"'
+        f'make -j {nprocs} -C ports/{port} {board_cmd}{variant_cmd}{args}"'
     )
     # fmt: on
 
     title = "Build" if "clean" not in extra_args else "Clean"
-    title += f" {port}/{board}" + (f" ({variant})" if variant else "")
+    title += _title + (f" ({variant})" if variant else "")
     print(Panel(build_cmd, title=title, title_align="left", padding=1))
 
     subprocess.run(build_cmd, shell=True)
@@ -122,7 +131,7 @@ def build_board(
     #    166
     #    >>> len(db.boards())
     #    169  # 3x boards are the 'special' boards without deployment instructions.
-    if _board.deploy and "clean" not in extra_args:
+    if _board and _board.deploy and "clean" not in extra_args:
         deploy_filename = Path(
             "/".join(
                 [
