@@ -201,3 +201,114 @@ def clean_board(
         mpy_dir=mpy_dir,
         extra_args=["clean"],
     )
+
+def make_command(
+    extra_args = None,
+    port = None,
+    mpy_dir: Optional[str] = None,
+) -> None:
+    from . import find_mpy_root
+    mpy_dir, auto_port = mpy_dir or find_mpy_root()
+    
+    # Detect port based on command line args, current directory structure, or specified port
+    current_port = port
+    make_path_from_args = None
+    
+    # Check for -C argument in extra_args
+    if not current_port and extra_args:
+        c_index = -1
+        for i, arg in enumerate(extra_args):
+            if arg == "-C" and i < len(extra_args) - 1:
+                c_index = i
+                break
+        
+        # If -C flag found with a path
+        if c_index >= 0:
+            target_path = extra_args[c_index + 1]
+            target_path_obj = Path(target_path)
+            
+            # Convert to absolute path if relative
+            if not target_path_obj.is_absolute():
+                target_path_obj = Path.cwd() / target_path_obj
+            
+            # Check if the path points to a port directory
+            ports_path = Path(mpy_dir) / "ports"
+            if ports_path in target_path_obj.parents:
+                port_parts = target_path_obj.relative_to(ports_path).parts
+                if port_parts:
+                    current_port = port_parts[0]
+                    make_path_from_args = str(target_path_obj.relative_to(mpy_dir))
+    
+    # If port not detected from args, check current directory
+    if not current_port:
+        cwd = Path.cwd()
+        ports_path = Path(mpy_dir) / "ports"
+        
+        # Check if we're in a port subdirectory
+        if ports_path in cwd.parents:
+            # Get immediate child directory of "ports"
+            port_parts = cwd.relative_to(ports_path).parts
+            if port_parts:
+                current_port = port_parts[0]
+        
+        # Fall back to detected port from find_mpy_root if still not found
+        if not current_port:
+            current_port = auto_port
+    
+    if not current_port:
+        print(f"Could not determine port from current directory, please specify with --port")
+        raise SystemExit()
+    
+    if current_port not in BUILD_CONTAINERS:
+        print(f"Sorry, builds are not supported for the {current_port} port at this time")
+        raise SystemExit()
+    
+    build_container =  BUILD_CONTAINERS[current_port]
+    
+    # Use the make path from -C arg if found, otherwise determine based on current directory
+    if make_path_from_args:
+        make_path = make_path_from_args
+        # Remove -C and its argument since we're passing it directly to the container
+        if extra_args:
+            for i, arg in enumerate(extra_args):
+                if arg == "-C" and i < len(extra_args) - 1:
+                    extra_args = extra_args[:i] + extra_args[i+2:]
+                    break
+    else:
+        # Determine if we need to specify the ports directory or use current directory
+        cwd = Path.cwd()
+        ports_dir = Path(mpy_dir) / "ports" / current_port
+        
+        # If we're in a subdirectory of the port, use current directory
+        if ports_dir in cwd.parents or ports_dir == cwd:
+            make_path = str(cwd.relative_to(mpy_dir))
+        else:
+            # Otherwise target the specific port
+            make_path = f"ports/{current_port}"
+    
+    args = " " + " ".join(extra_args or [])
+    
+    nprocs = multiprocessing.cpu_count()
+    uid, gid = os.getuid(), os.getgid()
+    home = os.environ["HOME"]
+    
+    # fmt: off
+    build_cmd = (
+        f"docker run -it --rm "
+        f"-v /sys/bus:/sys/bus "                # provides access to USB for deploy
+        f"-v /dev:/dev "                        # provides access to USB for deploy
+        f"--net=host --privileged "             # provides access to USB for deploy
+        f"-v {mpy_dir}:{mpy_dir} -w {mpy_dir} " # mount micropython dir with same path so elf/map paths match host
+        f"--user {uid}:{gid} "                  # match running user id so generated files aren't owned by root
+        f"-v {home}:{home} -e HOME={home} "     # when changing user id to one not present in container this ensures home is writable
+        f"{build_container} "
+        f'bash -c "'
+        f"git config --global --add safe.directory '*' 2> /dev/null;"
+        f'make -j {nprocs} -C {make_path}{args}"'
+    )
+    # fmt: on
+    
+    print(Panel(build_cmd, title=f"Make Command: {current_port} ({make_path})", title_align="left", padding=1))
+    
+    subprocess.run(build_cmd, shell=True)
+    
